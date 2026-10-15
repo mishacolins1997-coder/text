@@ -1,25 +1,23 @@
 :root {
     --sdf-d-color: inherit;
     --sdf-a-color: inherit;
-    --sdf-gap: 0.6em;
+    --sdf-gap: 0.3em;
+    --sdf-indent: 1.5em;
 }
 
-/* Отступы между блоками (реплика / действие) */
+/* Абзацы с красной строкой */
 .mes_text p.sdf-block {
     margin: 0 0 var(--sdf-gap) 0;
+    text-indent: var(--sdf-indent);
 }
 
 .mes_text p.sdf-block:last-child {
     margin-bottom: 0;
 }
 
-/* Курсив для действий */
-.mes_text .sdf-a {
-    font-style: italic;
-}
-
-body:not(.sdf-italic) .mes_text .sdf-a {
-    font-style: normal;
+/* Красная строка только у абзацев, начинающихся с реплики */
+body.sdf-indent-d .mes_text p.sdf-block:not(.sdf-block-dialogue) {
+    text-indent: 0;
 }
 
 /* Цвета (только если включена опция) */

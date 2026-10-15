@@ -5,17 +5,17 @@ const MODULE = 'dialogue_splitter';
 
 const DEFAULTS = {
     enabled: true,
-    split: true,            // разбивать на отдельные абзацы
-    mergeTags: true,        // не отрывать короткие ремарки автора ("— сказал он")
-    tagLen: 30,             // макс. длина такой ремарки
-    colorize: true,
+    split: true,               // начинать реплику с нового абзаца
+    splitAfter: false,         // дополнительно отделять действие, идущее после реплики и ремарки
+    indent: 1.5,               // красная строка, em
+    indentDialogueOnly: false, // красная строка только у абзацев, начинающихся с реплики
+    gap: 0.3,                  // отступ между абзацами, em
+    colorize: false,
     dialogueColor: '#f0cf8a',
     actionColor: '#a9b1bd',
-    italic: true,           // курсив для действий
-    gap: 0.6,               // отступ между блоками, em
 };
 
-// "реплика" в кавычках: "..." “...” «...» „...“
+// реплика в кавычках: "..." “...” «...» „...“
 const QUOTE_RE = /"[^"\n]+"|“[^”\n]+”|«[^»\n]+»|„[^“”\n]+[“”]/g;
 
 function getSettings() {
@@ -29,9 +29,9 @@ function getSettings() {
 
 /* ---------------------------- Обработка текста ---------------------------- */
 
-/** Разбирает <p> на последовательность сегментов: диалог / действие / разрыв / прочее. */
-function getSegments(p) {
-    const segs = [];
+/** Разбирает <p> на плоский список токенов: text / dialogue / em / inline / br. */
+function tokenize(p) {
+    const tokens = [];
     for (const node of Array.from(p.childNodes)) {
         if (node.nodeType === Node.TEXT_NODE) {
             const text = node.textContent;
@@ -39,104 +39,133 @@ function getSegments(p) {
             let m;
             QUOTE_RE.lastIndex = 0;
             while ((m = QUOTE_RE.exec(text)) !== null) {
-                if (m.index > last) segs.push({ type: 'action', node: document.createTextNode(text.slice(last, m.index)) });
-                segs.push({ type: 'dialogue', node: document.createTextNode(m[0]) });
+                if (m.index > last) tokens.push({ kind: 'text', node: document.createTextNode(text.slice(last, m.index)) });
+                tokens.push({ kind: 'dialogue', node: document.createTextNode(m[0]) });
                 last = m.index + m[0].length;
             }
-            if (last < text.length) segs.push({ type: 'action', node: document.createTextNode(text.slice(last)) });
+            if (last < text.length) tokens.push({ kind: 'text', node: document.createTextNode(text.slice(last)) });
         } else if (node.nodeName === 'Q') {
-            segs.push({ type: 'dialogue', node });
+            tokens.push({ kind: 'dialogue', node });
         } else if (node.nodeName === 'EM' || node.nodeName === 'I') {
-            segs.push({ type: 'action', node });
+            tokens.push({ kind: 'em', node });
         } else if (node.nodeName === 'BR') {
-            segs.push({ type: 'break', node });
+            tokens.push({ kind: 'br', node });
         } else {
-            segs.push({ type: 'inline', node }); // strong, code и т.п. — продолжают текущий блок
+            tokens.push({ kind: 'inline', node });
         }
     }
-    return segs;
+    return tokens;
 }
 
-/** Группирует сегменты в последовательные блоки одного типа. */
-function buildRuns(segs) {
-    const runs = [];
+/** Заканчивается ли накопленный текст законченным предложением (или репликой)? */
+function endsSentence(text) {
+    return /[.!?…»”"*]$/.test(text.trimEnd());
+}
+
+/**
+ * Правила:
+ *  - реплика начинает новый абзац (красная строка), если перед ней закончилось предложение;
+ *  - если перед репликой стоит подводка с двоеточием/запятой/тире
+ *    («Она ответила, не отрываясь от работы: «...»»), реплика остаётся в том же абзаце;
+ *  - ремарка автора и действия после реплики остаются в абзаце с репликой
+ *    (если не включена опция splitAfter).
+ */
+function splitIntoBlocks(tokens, s) {
+    const blocks = [];
     let cur = null;
+    let afterDialogue = false;
 
-    for (const seg of segs) {
-        if (seg.type === 'break') {
+    const newBlock = () => {
+        cur = { tokens: [], text: '' };
+        blocks.push(cur);
+    };
+    const add = (kind, node) => {
+        if (!cur) newBlock();
+        cur.tokens.push({ kind, node });
+        cur.text += node.textContent;
+    };
+
+    for (const t of tokens) {
+        if (t.kind === 'br') {
             cur = null;
+            afterDialogue = false;
             continue;
         }
 
-        const type = seg.type === 'inline' ? (cur ? cur.type : 'action') : seg.type;
-        const isText = seg.node.nodeType === Node.TEXT_NODE;
-
-        // пробелы между блоками
-        if (isText && !seg.node.textContent.trim()) {
-            if (cur) cur.items.push({ type: cur.type, node: seg.node });
+        if (t.kind === 'dialogue') {
+            if (cur && cur.text.trim() && endsSentence(cur.text)) newBlock();
+            add('dialogue', t.node);
+            afterDialogue = true;
             continue;
         }
 
-        if (!cur || cur.type !== type) {
-            cur = { type, items: [] };
-            runs.push(cur);
+        const isWhitespace = t.kind === 'text' && !t.node.textContent.trim();
+        if (isWhitespace) {
+            if (cur) add('text', t.node);
+            continue;
         }
-        cur.items.push({ type, node: seg.node });
-    }
 
-    // обрезаем пробелы по краям блоков
-    for (const run of runs) {
-        const first = run.items[0]?.node;
-        const last = run.items[run.items.length - 1]?.node;
-        if (first?.nodeType === Node.TEXT_NODE) first.textContent = first.textContent.trimStart();
-        if (last?.nodeType === Node.TEXT_NODE) last.textContent = last.textContent.trimEnd();
-        run.items = run.items.filter(it => it.node.nodeType !== Node.TEXT_NODE || it.node.textContent.length > 0);
-    }
-
-    return runs.filter(r => r.items.length > 0);
-}
-
-function runText(run) {
-    return run.items.map(it => it.node.textContent).join('').trim();
-}
-
-/** Приклеивает короткие ремарки ("— сказал он") к предыдущей реплике. */
-function mergeShortTags(runs, maxLen) {
-    for (let i = 1; i < runs.length; i++) {
-        const run = runs[i];
-        const prev = runs[i - 1];
-        if (run.type !== 'action' || prev.type !== 'dialogue') continue;
-
-        const firstEl = run.items.find(it => it.node.nodeType !== Node.TEXT_NODE || it.node.textContent.trim());
-        if (firstEl && (firstEl.node.nodeName === 'EM' || firstEl.node.nodeName === 'I')) continue;
-
-        const text = runText(run);
-        if (text.length > maxLen) continue;
-        if (!/^\s*[—–-]/.test(text) && !/^[\s,]*\p{Ll}/u.test(text)) continue;
-
-        prev.items.push({ type: 'action', node: document.createTextNode(' ') });
-        prev.items.push(...run.items);
-        runs.splice(i, 1);
-        i--;
-    }
-}
-
-function buildBlock(items, blockType) {
-    const p = document.createElement('p');
-    p.className = `sdf-block sdf-block-${blockType}`;
-
-    for (const { type, node } of items) {
-        const cls = type === 'dialogue' ? 'sdf-d' : 'sdf-a';
-
-        if (node.nodeType === Node.TEXT_NODE) {
-            if (!node.textContent.trim()) {
-                p.appendChild(node);
+        if (s.splitAfter && afterDialogue) {
+            if (t.kind === 'text') {
+                const text = t.node.textContent;
+                let tag = '';
+                let rest = text;
+                // ремарка автора: «— сказал он.» / «, проскрипела старушка.»
+                if (/^\s*[—–-]/.test(text) || /^[\s,]*\p{Ll}/u.test(text)) {
+                    const m = /[.!?…]+(?=\s|$)/.exec(text);
+                    if (m) {
+                        const end = m.index + m[0].length;
+                        tag = text.slice(0, end);
+                        rest = text.slice(end);
+                    } else {
+                        tag = text;
+                        rest = '';
+                    }
+                }
+                if (tag) add('text', document.createTextNode(tag));
+                if (rest.trim()) {
+                    newBlock();
+                    add('text', document.createTextNode(rest));
+                }
+                afterDialogue = false;
                 continue;
             }
-            const span = document.createElement('span');
-            span.className = cls;
-            span.appendChild(node);
-            p.appendChild(span);
+            if (t.kind === 'em') {
+                newBlock();
+                add('em', t.node);
+                afterDialogue = false;
+                continue;
+            }
+        }
+
+        add(t.kind, t.node);
+    }
+
+    // чистим пробелы по краям блоков
+    for (const block of blocks) {
+        const isWs = tk => tk.node.nodeType === Node.TEXT_NODE && !tk.node.textContent.trim();
+        while (block.tokens.length && isWs(block.tokens[0])) block.tokens.shift();
+        while (block.tokens.length && isWs(block.tokens[block.tokens.length - 1])) block.tokens.pop();
+
+        const first = block.tokens[0]?.node;
+        const last = block.tokens[block.tokens.length - 1]?.node;
+        if (first?.nodeType === Node.TEXT_NODE) first.textContent = first.textContent.trimStart();
+        if (last?.nodeType === Node.TEXT_NODE) last.textContent = last.textContent.trimEnd();
+    }
+
+    return blocks.filter(b => b.tokens.length > 0);
+}
+
+function buildParagraph(block) {
+    const p = document.createElement('p');
+    const startsWithDialogue = block.tokens[0].kind === 'dialogue';
+    p.className = `sdf-block ${startsWithDialogue ? 'sdf-block-dialogue' : 'sdf-block-action'}`;
+
+    for (const { kind, node } of block.tokens) {
+        const cls = kind === 'dialogue' ? 'sdf-d' : 'sdf-a';
+
+        if (node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) {
+            p.appendChild(node);
         } else if (node.nodeName === 'Q' || node.nodeName === 'EM' || node.nodeName === 'I') {
             node.classList.add(cls);
             p.appendChild(node);
@@ -151,24 +180,15 @@ function buildBlock(items, blockType) {
 }
 
 function processParagraph(p, s) {
-    const runs = buildRuns(getSegments(p));
-    if (runs.length === 0) return;
+    const tokens = tokenize(p);
+    if (tokens.length === 0) return;
 
-    if (s.mergeTags) mergeShortTags(runs, s.tagLen);
+    const blocks = s.split
+        ? splitIntoBlocks(tokens, s)
+        : [{ tokens, text: '' }];
 
-    let blocks;
-    if (s.split) {
-        blocks = runs.map(run => buildBlock(run.items, run.type));
-    } else {
-        const all = [];
-        runs.forEach((run, i) => {
-            if (i > 0) all.push({ type: run.type, node: document.createTextNode(' ') });
-            all.push(...run.items);
-        });
-        blocks = [buildBlock(all, 'mixed')];
-    }
-
-    p.replaceWith(...blocks);
+    if (blocks.length === 0) return;
+    p.replaceWith(...blocks.map(buildParagraph));
 }
 
 function processMessage(el) {
@@ -192,8 +212,9 @@ function applyStyle() {
     root.setProperty('--sdf-d-color', s.dialogueColor);
     root.setProperty('--sdf-a-color', s.actionColor);
     root.setProperty('--sdf-gap', `${s.gap}em`);
+    root.setProperty('--sdf-indent', `${s.indent}em`);
     document.body.classList.toggle('sdf-colorize', !!s.colorize);
-    document.body.classList.toggle('sdf-italic', !!s.italic);
+    document.body.classList.toggle('sdf-indent-d', !!s.indentDialogueOnly);
 }
 
 /* ------------------------------ Интерфейс -------------------------------- */
@@ -210,22 +231,23 @@ function buildSettingsUI() {
             </div>
             <div class="inline-drawer-content">
                 <label class="checkbox_label"><input type="checkbox" id="sdf_enabled"><span>Включить расширение</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_split"><span>Разделять реплики и действия на отдельные абзацы</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_merge"><span>Не отрывать короткие ремарки («— сказал он»)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="sdf_split"><span>Реплика — с новой строки (красная строка)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="sdf_after"><span>Отделять действие, идущее после реплики и ремарки автора</span></label>
+                <hr>
                 <div class="sdf-row">
-                    <span>Макс. длина ремарки:</span>
-                    <input type="number" id="sdf_taglen" class="text_pole" min="5" max="200" step="5">
+                    <span>Красная строка (em):</span>
+                    <input type="number" id="sdf_indent" class="text_pole" min="0" max="6" step="0.5">
+                </div>
+                <label class="checkbox_label"><input type="checkbox" id="sdf_indent_d"><span>Красная строка только у абзацев с репликой</span></label>
+                <div class="sdf-row">
+                    <span>Отступ между абзацами (em):</span>
+                    <input type="number" id="sdf_gap" class="text_pole" min="0" max="3" step="0.1">
                 </div>
                 <hr>
                 <label class="checkbox_label"><input type="checkbox" id="sdf_colorize"><span>Раскрасить реплики и действия</span></label>
                 <div class="sdf-row">
                     <span>Реплики:</span><input type="color" id="sdf_dcolor">
                     <span>Действия:</span><input type="color" id="sdf_acolor">
-                </div>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_italic"><span>Курсив для действий</span></label>
-                <div class="sdf-row">
-                    <span>Отступ между блоками (em):</span>
-                    <input type="number" id="sdf_gap" class="text_pole" min="0" max="3" step="0.1">
                 </div>
                 <div class="sdf-row">
                     <div id="sdf_apply" class="menu_button">Применить к текущему чату</div>
@@ -239,13 +261,13 @@ function buildSettingsUI() {
 
     $('#sdf_enabled').prop('checked', s.enabled);
     $('#sdf_split').prop('checked', s.split);
-    $('#sdf_merge').prop('checked', s.mergeTags);
-    $('#sdf_taglen').val(s.tagLen);
+    $('#sdf_after').prop('checked', s.splitAfter);
+    $('#sdf_indent').val(s.indent);
+    $('#sdf_indent_d').prop('checked', s.indentDialogueOnly);
+    $('#sdf_gap').val(s.gap);
     $('#sdf_colorize').prop('checked', s.colorize);
     $('#sdf_dcolor').val(s.dialogueColor);
     $('#sdf_acolor').val(s.actionColor);
-    $('#sdf_italic').prop('checked', s.italic);
-    $('#sdf_gap').val(s.gap);
 
     const bind = (selector, key, getter, needsReload) => {
         $(selector).on('input change', function () {
@@ -262,13 +284,13 @@ function buildSettingsUI() {
 
     bind('#sdf_enabled', 'enabled', checked, true);
     bind('#sdf_split', 'split', checked, true);
-    bind('#sdf_merge', 'mergeTags', checked, true);
-    bind('#sdf_taglen', 'tagLen', num, true);
+    bind('#sdf_after', 'splitAfter', checked, true);
+    bind('#sdf_indent', 'indent', num, false);
+    bind('#sdf_indent_d', 'indentDialogueOnly', checked, false);
+    bind('#sdf_gap', 'gap', num, false);
     bind('#sdf_colorize', 'colorize', checked, false);
     bind('#sdf_dcolor', 'dialogueColor', value, false);
     bind('#sdf_acolor', 'actionColor', value, false);
-    bind('#sdf_italic', 'italic', checked, false);
-    bind('#sdf_gap', 'gap', num, false);
 
     $('#sdf_apply').on('click', async () => {
         $('#sdf_apply').removeClass('redWarningBG');
