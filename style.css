@@ -1,0 +1,44 @@
+:root {
+    --sdf-d-color: inherit;
+    --sdf-a-color: inherit;
+    --sdf-gap: 0.6em;
+}
+
+/* Отступы между блоками (реплика / действие) */
+.mes_text p.sdf-block {
+    margin: 0 0 var(--sdf-gap) 0;
+}
+
+.mes_text p.sdf-block:last-child {
+    margin-bottom: 0;
+}
+
+/* Курсив для действий */
+.mes_text .sdf-a {
+    font-style: italic;
+}
+
+body:not(.sdf-italic) .mes_text .sdf-a {
+    font-style: normal;
+}
+
+/* Цвета (только если включена опция) */
+body.sdf-colorize .mes_text .sdf-d {
+    color: var(--sdf-d-color);
+}
+
+body.sdf-colorize .mes_text .sdf-a {
+    color: var(--sdf-a-color);
+}
+
+/* Настройки */
+.sdf-settings .sdf-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+}
+
+.sdf-settings input[type="number"] {
+    width: 70px;
+}
