@@ -23,3 +23,28 @@ body.st-dsplit-nohyphen .mes_text * {
     word-break: normal !important;
     overflow-wrap: break-word;
 }
+
+/* Красная строка */
+body.st-dsplit-indent .mes_text > p {
+    text-indent: 1.5em;
+}
+
+/* Разные фоны: реплики / действия / повествование */
+body.st-dsplit-tint .mes_text > p.st-dsplit-speech,
+body.st-dsplit-tint .mes_text > p.st-dsplit-action {
+    padding: 0.35em 0.7em;
+    border-radius: 8px;
+    border-left: 3px solid transparent;
+}
+
+body.st-dsplit-tint .mes_text > p.st-dsplit-speech {
+    background: rgba(106, 169, 255, 0.12);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #6aa9ff) 14%, transparent);
+    border-left-color: var(--SmartThemeQuoteColor, #6aa9ff);
+}
+
+body.st-dsplit-tint .mes_text > p.st-dsplit-action {
+    background: rgba(160, 160, 160, 0.10);
+    background: color-mix(in srgb, var(--SmartThemeEmColor, #aaaaaa) 12%, transparent);
+    border-left-color: var(--SmartThemeEmColor, #aaaaaa);
+}
