@@ -1,42 +1,25 @@
-:root {
-    --sdf-d-color: inherit;
-    --sdf-a-color: inherit;
-    --sdf-gap: 0.3em;
-    --sdf-indent: 1.5em;
+body.st-dsplit-spacing .mes_text p {
+    margin-top: 0;
+    margin-bottom: 0.9em;
 }
 
-/* Абзацы с красной строкой */
-.mes_text p.sdf-block {
-    margin: 0 0 var(--sdf-gap) 0;
-    text-indent: var(--sdf-indent);
-}
-
-.mes_text p.sdf-block:last-child {
+body.st-dsplit-spacing .mes_text p:last-child {
     margin-bottom: 0;
 }
 
-/* Красная строка только у абзацев, начинающихся с реплики */
-body.sdf-indent-d .mes_text p.sdf-block:not(.sdf-block-dialogue) {
-    text-indent: 0;
+.st-dsplit-settings .checkbox_label {
+    margin: 4px 0;
 }
 
-/* Цвета (только если включена опция) */
-body.sdf-colorize .mes_text .sdf-d {
-    color: var(--sdf-d-color);
+.st-dsplit-settings .menu_button {
+    margin-top: 10px;
 }
 
-body.sdf-colorize .mes_text .sdf-a {
-    color: var(--sdf-a-color);
-}
-
-/* Настройки */
-.sdf-settings .sdf-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 6px 0;
-}
-
-.sdf-settings input[type="number"] {
-    width: 70px;
+/* Запрещаем браузеру переносить слова с дефисом («Полов-ины») */
+body.st-dsplit-nohyphen .mes_text,
+body.st-dsplit-nohyphen .mes_text * {
+    hyphens: manual !important;
+    -webkit-hyphens: manual !important;
+    word-break: normal !important;
+    overflow-wrap: break-word;
 }

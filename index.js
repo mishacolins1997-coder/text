@@ -1,321 +1,153 @@
-import { eventSource, event_types, saveSettingsDebounced, reloadCurrentChat } from '../../../../script.js';
+import { eventSource, event_types, chat, saveChatConditional, saveSettingsDebounced, updateMessageBlock } from '../../../../script.js';
 import { extension_settings } from '../../../extensions.js';
+import { formatText } from './formatter.js';
 
 const MODULE = 'dialogue_splitter';
-
 const DEFAULTS = {
-    enabled: true,
-    split: true,               // начинать реплику с нового абзаца
-    splitAfter: false,         // дополнительно отделять действие, идущее после реплики и ремарки
-    indent: 1.5,               // красная строка, em
-    indentDialogueOnly: false, // красная строка только у абзацев, начинающихся с реплики
-    gap: 0.3,                  // отступ между абзацами, em
-    colorize: false,
-    dialogueColor: '#f0cf8a',
-    actionColor: '#a9b1bd',
+    auto: true,           // форматировать новые ответы персонажа автоматически
+    userMessages: false,  // форматировать и сообщения пользователя
+    attachTags: true,     // «...», — сказал он  (слова автора остаются с репликой)
+    dashDialogue: true,   // реплики через тире (— Привет!)
+    separator: 'blank',   // 'blank' = пустая строка, 'single' = обычный перенос
+    spacing: true,        // отступы между абзацами в чате
+    fixHyphens: true,     // склеивать слова, разорванные переносом («Полов-\nины»)
+    noAutoHyphens: true,  // отключить авто-переносы слов браузером в чате
 };
 
-// реплика в кавычках: "..." “...” «...» „...“
-const QUOTE_RE = /"[^"\n]+"|“[^”\n]+”|«[^»\n]+»|„[^“”\n]+[“”]/g;
-
 function getSettings() {
-    if (!extension_settings[MODULE]) extension_settings[MODULE] = {};
-    const s = extension_settings[MODULE];
-    for (const key of Object.keys(DEFAULTS)) {
-        if (!(key in s)) s[key] = DEFAULTS[key];
-    }
-    return s;
+    extension_settings[MODULE] = Object.assign({}, DEFAULTS, extension_settings[MODULE]);
+    return extension_settings[MODULE];
 }
 
-/* ---------------------------- Обработка текста ---------------------------- */
-
-/** Разбирает <p> на плоский список токенов: text / dialogue / em / inline / br. */
-function tokenize(p) {
-    const tokens = [];
-    for (const node of Array.from(p.childNodes)) {
-        if (node.nodeType === Node.TEXT_NODE) {
-            const text = node.textContent;
-            let last = 0;
-            let m;
-            QUOTE_RE.lastIndex = 0;
-            while ((m = QUOTE_RE.exec(text)) !== null) {
-                if (m.index > last) tokens.push({ kind: 'text', node: document.createTextNode(text.slice(last, m.index)) });
-                tokens.push({ kind: 'dialogue', node: document.createTextNode(m[0]) });
-                last = m.index + m[0].length;
-            }
-            if (last < text.length) tokens.push({ kind: 'text', node: document.createTextNode(text.slice(last)) });
-        } else if (node.nodeName === 'Q') {
-            tokens.push({ kind: 'dialogue', node });
-        } else if (node.nodeName === 'EM' || node.nodeName === 'I') {
-            tokens.push({ kind: 'em', node });
-        } else if (node.nodeName === 'BR') {
-            tokens.push({ kind: 'br', node });
-        } else {
-            tokens.push({ kind: 'inline', node });
-        }
-    }
-    return tokens;
-}
-
-/** Заканчивается ли накопленный текст законченным предложением (или репликой)? */
-function endsSentence(text) {
-    return /[.!?…»”"*]$/.test(text.trimEnd());
-}
-
-/**
- * Правила:
- *  - реплика начинает новый абзац (красная строка), если перед ней закончилось предложение;
- *  - если перед репликой стоит подводка с двоеточием/запятой/тире
- *    («Она ответила, не отрываясь от работы: «...»»), реплика остаётся в том же абзаце;
- *  - ремарка автора и действия после реплики остаются в абзаце с репликой
- *    (если не включена опция splitAfter).
- */
-function splitIntoBlocks(tokens, s) {
-    const blocks = [];
-    let cur = null;
-    let afterDialogue = false;
-
-    const newBlock = () => {
-        cur = { tokens: [], text: '' };
-        blocks.push(cur);
+function formatOptions() {
+    const s = getSettings();
+    return {
+        attachTags: s.attachTags,
+        dashDialogue: s.dashDialogue,
+        fixHyphens: s.fixHyphens,
+        separator: s.separator === 'single' ? '\n' : '\n\n',
     };
-    const add = (kind, node) => {
-        if (!cur) newBlock();
-        cur.tokens.push({ kind, node });
-        cur.text += node.textContent;
-    };
+}
 
-    for (const t of tokens) {
-        if (t.kind === 'br') {
-            cur = null;
-            afterDialogue = false;
-            continue;
-        }
+/** Переформатирует сообщение по индексу. Возвращает true, если текст изменился. */
+async function reformatMessage(id) {
+    const msg = chat[id];
+    if (!msg || msg.is_system || typeof msg.mes !== 'string') return false;
 
-        if (t.kind === 'dialogue') {
-            if (cur && cur.text.trim() && endsSentence(cur.text)) newBlock();
-            add('dialogue', t.node);
-            afterDialogue = true;
-            continue;
-        }
+    const next = formatText(msg.mes, formatOptions());
+    if (next === msg.mes) return false;
 
-        const isWhitespace = t.kind === 'text' && !t.node.textContent.trim();
-        if (isWhitespace) {
-            if (cur) add('text', t.node);
-            continue;
-        }
-
-        if (s.splitAfter && afterDialogue) {
-            if (t.kind === 'text') {
-                const text = t.node.textContent;
-                let tag = '';
-                let rest = text;
-                // ремарка автора: «— сказал он.» / «, проскрипела старушка.»
-                if (/^\s*[—–-]/.test(text) || /^[\s,]*\p{Ll}/u.test(text)) {
-                    const m = /[.!?…]+(?=\s|$)/.exec(text);
-                    if (m) {
-                        const end = m.index + m[0].length;
-                        tag = text.slice(0, end);
-                        rest = text.slice(end);
-                    } else {
-                        tag = text;
-                        rest = '';
-                    }
-                }
-                if (tag) add('text', document.createTextNode(tag));
-                if (rest.trim()) {
-                    newBlock();
-                    add('text', document.createTextNode(rest));
-                }
-                afterDialogue = false;
-                continue;
-            }
-            if (t.kind === 'em') {
-                newBlock();
-                add('em', t.node);
-                afterDialogue = false;
-                continue;
-            }
-        }
-
-        add(t.kind, t.node);
+    msg.mes = next;
+    if (Array.isArray(msg.swipes) && msg.swipe_id !== undefined && msg.swipes[msg.swipe_id] !== undefined) {
+        msg.swipes[msg.swipe_id] = next;
     }
-
-    // чистим пробелы по краям блоков
-    for (const block of blocks) {
-        const isWs = tk => tk.node.nodeType === Node.TEXT_NODE && !tk.node.textContent.trim();
-        while (block.tokens.length && isWs(block.tokens[0])) block.tokens.shift();
-        while (block.tokens.length && isWs(block.tokens[block.tokens.length - 1])) block.tokens.pop();
-
-        const first = block.tokens[0]?.node;
-        const last = block.tokens[block.tokens.length - 1]?.node;
-        if (first?.nodeType === Node.TEXT_NODE) first.textContent = first.textContent.trimStart();
-        if (last?.nodeType === Node.TEXT_NODE) last.textContent = last.textContent.trimEnd();
-    }
-
-    return blocks.filter(b => b.tokens.length > 0);
+    updateMessageBlock(id, msg);
+    await saveChatConditional();
+    return true;
 }
 
-function buildParagraph(block) {
-    const p = document.createElement('p');
-    const startsWithDialogue = block.tokens[0].kind === 'dialogue';
-    p.className = `sdf-block ${startsWithDialogue ? 'sdf-block-dialogue' : 'sdf-block-action'}`;
-
-    for (const { kind, node } of block.tokens) {
-        const cls = kind === 'dialogue' ? 'sdf-d' : 'sdf-a';
-
-        if (node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) {
-            p.appendChild(node);
-        } else if (node.nodeName === 'Q' || node.nodeName === 'EM' || node.nodeName === 'I') {
-            node.classList.add(cls);
-            p.appendChild(node);
-        } else {
-            const span = document.createElement('span');
-            span.className = cls;
-            span.appendChild(node);
-            p.appendChild(span);
-        }
-    }
-    return p;
+function applyBodyClass() {
+    document.body.classList.toggle('st-dsplit-spacing', getSettings().spacing);
+    document.body.classList.toggle('st-dsplit-nohyphen', getSettings().noAutoHyphens);
 }
 
-function processParagraph(p, s) {
-    const tokens = tokenize(p);
-    if (tokens.length === 0) return;
-
-    const blocks = s.split
-        ? splitIntoBlocks(tokens, s)
-        : [{ tokens, text: '' }];
-
-    if (blocks.length === 0) return;
-    p.replaceWith(...blocks.map(buildParagraph));
+function addMessageButtons() {
+    const btn = '<div title="Разделить диалоги и действия" class="mes_button st-dsplit-btn fa-solid fa-align-left interactable" tabindex="0"></div>';
+    $('#message_template .mes_buttons .extraMesButtons').prepend(btn);
+    $('#chat .mes .extraMesButtons').each(function () {
+        if (!$(this).find('.st-dsplit-btn').length) $(this).prepend(btn);
+    });
+    $(document).on('click', '.st-dsplit-btn', async function () {
+        const id = Number($(this).closest('.mes').attr('mesid'));
+        if (Number.isNaN(id)) return;
+        const changed = await reformatMessage(id);
+        toastr.info(changed ? 'Сообщение отформатировано' : 'Менять нечего', 'Dialogue Splitter');
+    });
 }
 
-function processMessage(el) {
-    const s = getSettings();
-    if (!s.enabled || !el || el.querySelector('.sdf-block')) return;
-
-    for (const child of Array.from(el.children)) {
-        if (child.tagName === 'P') processParagraph(child, s);
-    }
-}
-
-function processAll() {
-    document.querySelectorAll('#chat .mes_text').forEach(processMessage);
-}
-
-/* -------------------------------- Стили ---------------------------------- */
-
-function applyStyle() {
-    const s = getSettings();
-    const root = document.documentElement.style;
-    root.setProperty('--sdf-d-color', s.dialogueColor);
-    root.setProperty('--sdf-a-color', s.actionColor);
-    root.setProperty('--sdf-gap', `${s.gap}em`);
-    root.setProperty('--sdf-indent', `${s.indent}em`);
-    document.body.classList.toggle('sdf-colorize', !!s.colorize);
-    document.body.classList.toggle('sdf-indent-d', !!s.indentDialogueOnly);
-}
-
-/* ------------------------------ Интерфейс -------------------------------- */
-
-function buildSettingsUI() {
-    const s = getSettings();
-
+function renderSettings() {
     const html = `
-    <div class="sdf-settings">
+    <div class="st-dsplit-settings">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
                 <b>Dialogue Splitter</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
-                <label class="checkbox_label"><input type="checkbox" id="sdf_enabled"><span>Включить расширение</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_split"><span>Реплика — с новой строки (красная строка)</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_after"><span>Отделять действие, идущее после реплики и ремарки автора</span></label>
-                <hr>
-                <div class="sdf-row">
-                    <span>Красная строка (em):</span>
-                    <input type="number" id="sdf_indent" class="text_pole" min="0" max="6" step="0.5">
-                </div>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_indent_d"><span>Красная строка только у абзацев с репликой</span></label>
-                <div class="sdf-row">
-                    <span>Отступ между абзацами (em):</span>
-                    <input type="number" id="sdf_gap" class="text_pole" min="0" max="3" step="0.1">
-                </div>
-                <hr>
-                <label class="checkbox_label"><input type="checkbox" id="sdf_colorize"><span>Раскрасить реплики и действия</span></label>
-                <div class="sdf-row">
-                    <span>Реплики:</span><input type="color" id="sdf_dcolor">
-                    <span>Действия:</span><input type="color" id="sdf_acolor">
-                </div>
-                <div class="sdf-row">
-                    <div id="sdf_apply" class="menu_button">Применить к текущему чату</div>
-                </div>
-                <small>Расширение меняет только отображение, сам текст сообщений не изменяется.</small>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_auto"><span>Авто-форматирование ответов персонажа</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_user"><span>Форматировать и мои сообщения</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_tags"><span>Оставлять слова автора рядом с репликой («…», — сказал он)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_dash"><span>Считать репликами строки с тире (— Привет!)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_fixhyph"><span>Склеивать слова, разорванные переносом (Полов-ины)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_nohyph"><span>Отключить авто-переносы слов в чате</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="st_dsplit_spacing"><span>Отступы между абзацами в чате</span></label>
+                <label for="st_dsplit_sep">Разделитель абзацев</label>
+                <select id="st_dsplit_sep" class="text_pole">
+                    <option value="blank">Пустая строка</option>
+                    <option value="single">Обычный перенос строки</option>
+                </select>
+                <div class="menu_button" id="st_dsplit_last">Отформатировать последнее сообщение</div>
             </div>
         </div>
     </div>`;
-
     $('#extensions_settings2').append(html);
 
-    $('#sdf_enabled').prop('checked', s.enabled);
-    $('#sdf_split').prop('checked', s.split);
-    $('#sdf_after').prop('checked', s.splitAfter);
-    $('#sdf_indent').val(s.indent);
-    $('#sdf_indent_d').prop('checked', s.indentDialogueOnly);
-    $('#sdf_gap').val(s.gap);
-    $('#sdf_colorize').prop('checked', s.colorize);
-    $('#sdf_dcolor').val(s.dialogueColor);
-    $('#sdf_acolor').val(s.actionColor);
-
-    const bind = (selector, key, getter, needsReload) => {
-        $(selector).on('input change', function () {
-            s[key] = getter($(this));
+    const s = getSettings();
+    const bind = (sel, key) => {
+        $(sel).prop('checked', s[key]).on('change', function () {
+            s[key] = $(this).prop('checked');
             saveSettingsDebounced();
-            applyStyle();
-            if (needsReload) $('#sdf_apply').addClass('redWarningBG');
+            if (key === 'spacing' || key === 'noAutoHyphens') applyBodyClass();
         });
     };
+    bind('#st_dsplit_auto', 'auto');
+    bind('#st_dsplit_user', 'userMessages');
+    bind('#st_dsplit_tags', 'attachTags');
+    bind('#st_dsplit_dash', 'dashDialogue');
+    bind('#st_dsplit_spacing', 'spacing');
+    bind('#st_dsplit_fixhyph', 'fixHyphens');
+    bind('#st_dsplit_nohyph', 'noAutoHyphens');
 
-    const checked = el => el.prop('checked');
-    const value = el => el.val();
-    const num = el => Number(el.val()) || 0;
-
-    bind('#sdf_enabled', 'enabled', checked, true);
-    bind('#sdf_split', 'split', checked, true);
-    bind('#sdf_after', 'splitAfter', checked, true);
-    bind('#sdf_indent', 'indent', num, false);
-    bind('#sdf_indent_d', 'indentDialogueOnly', checked, false);
-    bind('#sdf_gap', 'gap', num, false);
-    bind('#sdf_colorize', 'colorize', checked, false);
-    bind('#sdf_dcolor', 'dialogueColor', value, false);
-    bind('#sdf_acolor', 'actionColor', value, false);
-
-    $('#sdf_apply').on('click', async () => {
-        $('#sdf_apply').removeClass('redWarningBG');
-        await reloadCurrentChat();
+    $('#st_dsplit_sep').val(s.separator).on('change', function () {
+        s.separator = String($(this).val());
+        saveSettingsDebounced();
+    });
+    $('#st_dsplit_last').on('click', async () => {
+        const changed = await reformatMessage(chat.length - 1);
+        toastr.info(changed ? 'Сообщение отформатировано' : 'Менять нечего', 'Dialogue Splitter');
     });
 }
 
-/* -------------------------------- Запуск --------------------------------- */
+async function registerSlashCommand() {
+    try {
+        const { SlashCommandParser } = await import('../../../slash-commands/SlashCommandParser.js');
+        const { SlashCommand } = await import('../../../slash-commands/SlashCommand.js');
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: 'dsplit',
+            helpString: 'Разделяет реплики и действия в сообщении. Без аргумента — последнее сообщение, иначе номер сообщения: /dsplit 12',
+            callback: async (_args, value) => {
+                const id = value && String(value).trim() ? Number(value) : chat.length - 1;
+                const changed = await reformatMessage(id);
+                return changed ? 'ok' : 'no changes';
+            },
+        }));
+    } catch (e) {
+        console.warn('[Dialogue Splitter] slash command not registered', e);
+    }
+}
 
 jQuery(() => {
     getSettings();
-    buildSettingsUI();
-    applyStyle();
+    renderSettings();
+    addMessageButtons();
+    applyBodyClass();
+    registerSlashCommand();
 
-    // Следим за чатом: новые сообщения, свайпы, правки, смена чата
-    const chat = document.getElementById('chat');
-    if (chat) {
-        let timer = null;
-        const observer = new MutationObserver(() => {
-            clearTimeout(timer);
-            timer = setTimeout(processAll, 120);
-        });
-        observer.observe(chat, { childList: true, subtree: true });
-    }
-
-    eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(processAll, 150));
-    processAll();
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, async (id) => {
+        if (getSettings().auto) await reformatMessage(Number(id));
+    });
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, async (id) => {
+        const s = getSettings();
+        if (s.auto && s.userMessages) await reformatMessage(Number(id));
+    });
 });

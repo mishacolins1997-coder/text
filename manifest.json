@@ -1,11 +1,11 @@
 {
     "display_name": "Dialogue Splitter",
-    "loading_order": 50,
+    "loading_order": 10,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "author": "you",
-    "version": "1.1.0",
-    "homePage": ""
+    "author": "YOUR_NAME",
+    "version": "1.0.0",
+    "homePage": "https://github.com/YOUR_USERNAME/SillyTavern-DialogueSplitter"
 }
